@@ -474,29 +474,64 @@ _OPTIONS_CONFLICTS = [
     ("uploads&acl", "acl, uploads"),
     ("partNumber=1&acl", "acl, partNumber"),
 ]
+# Each path conflicts over its own selectors only: beside `acl`, a bucket's `analytics` is the
+# preflight at a key, and a key's `retention` and `annotationName` at a bucket.
+_OPTIONS_BUCKET_CONFLICTS = [*_OPTIONS_CONFLICTS, ("acl&analytics", "acl, analytics")]
+_OPTIONS_KEY_CONFLICTS = [
+    *_OPTIONS_CONFLICTS,
+    ("acl&retention", "acl, retention"),
+    ("annotationName=x&acl", "acl, annotationName"),
+]
 _OPTIONS_QUERY_ROWS = [
     *[
-        (path, query, "InvalidArgument", f"Conflicting query string parameters: {names}")
-        for path in _OPTIONS_BUCKET_PATHS + _OPTIONS_KEY_PATHS
-        for query, names in _OPTIONS_CONFLICTS
+        (
+            path,
+            query,
+            "InvalidArgument",
+            f"Conflicting query string parameters: {names}",
+            names.split(", ")[0],
+        )
+        for paths, conflicts in (
+            (_OPTIONS_BUCKET_PATHS, _OPTIONS_BUCKET_CONFLICTS),
+            (_OPTIONS_KEY_PATHS, _OPTIONS_KEY_CONFLICTS),
+        )
+        for path in paths
+        for query, names in conflicts
     ],
     *[
-        (path, f"partNumber={value}", "InvalidRequest", "Object must have a valid key name.")
+        (path, f"partNumber={value}", "InvalidRequest", "Object must have a valid key name.", None)
         for path in _OPTIONS_BUCKET_PATHS
         for value in ("1", "abc", "")
     ],
     *[
-        (path, query, None, None)
-        for path in _OPTIONS_BUCKET_PATHS
-        for query in ("acl", "partNumber=1&uploadId=u")
-    ],
-    *[
-        (path, query, None, None)
+        (
+            path,
+            f"annotationName={value}",
+            "InvalidArgument",
+            "Unexpected query string parameter",
+            "annotationName",
+        )
         for path in _OPTIONS_KEY_PATHS
-        for query in ("acl", "partNumber=1", "partNumber=abc", "partNumber=1&uploadId=u")
+        for value in ("x", "")
     ],
     *[
-        (path, query, None, None)
+        (path, query, None, None, None)
+        for path in _OPTIONS_BUCKET_PATHS
+        for query in ("acl", "partNumber=1&uploadId=u", "acl&retention", "annotationName=x")
+    ],
+    *[
+        (path, query, None, None, None)
+        for path in _OPTIONS_KEY_PATHS
+        for query in (
+            "acl",
+            "partNumber=1",
+            "partNumber=abc",
+            "partNumber=1&uploadId=u",
+            "acl&analytics",
+        )
+    ],
+    *[
+        (path, query, None, None, None)
         for path in ("/s3", "/s3/")
         for query in (
             "partNumber=1",
@@ -512,41 +547,49 @@ _OPTIONS_QUERY_ROWS = [
 ]
 
 
-@pytest.mark.parametrize("path, query, code, message", _OPTIONS_QUERY_ROWS)
-@pytest.mark.parametrize("origin", [False, True], ids=["no-origin", "origin"])
-@pytest.mark.parametrize("signed", [False, True], ids=["unsigned", "signed"])
-def test_s3_an_options_checks_conflicts_and_a_buckets_part_number_before_cors(
-    live_server, path, query, code, message, origin, signed
+@pytest.mark.parametrize("path, query, code, message, value", _OPTIONS_QUERY_ROWS)
+@pytest.mark.parametrize("asked", [None, "GET", "put"], ids=["no-origin", "origin", "bad-method"])
+@pytest.mark.parametrize("tampered", [False, True], ids=["unsigned", "tampered"])
+def test_s3_an_options_refuses_its_query_before_the_preflight(
+    live_server, path, query, code, message, value, asked, tampered
 ):
-    """The query refusals measured in ``backlot.routers.s3._cors_preflight`` precede the preflight,
-    regardless of the credential or Origin. A single selector and a multipart pair still reach
-    CORS, as does every query at the service root."""
+    """The rows with a code are refused ahead of the preflight, with or without an `Origin`, ahead
+    of a method the preflight does not take, and unsigned and over a bad secret alike
+    (``backlot.routers.s3._cors_preflight``); the rest are the preflight itself."""
     import httpx
 
     base_url, settings = live_server
-    headers = {"Origin": "https://example.invalid", "Access-Control-Request-Method": "GET"}
-    headers = headers if origin else {}
-    url = f"{path}?{query}"
-    r = (
-        _signed(base_url, url, settings.admin_token, method="OPTIONS", extra_headers=headers)
-        if signed
-        else httpx.request("OPTIONS", f"{base_url}{url}", headers=headers)
+    headers = {"Origin": "https://example.invalid", "Access-Control-Request-Method": asked}
+    headers = headers if asked else {}
+    url, headers = (
+        _sign_get(
+            base_url,
+            f"{path}?{query}",
+            settings.admin_token,
+            tamper=True,
+            method="OPTIONS",
+            extra_headers=headers,
+        )
+        if tampered
+        else (f"{base_url}{path}?{query}", headers)
     )
-    expected = {}
-    status = 400
-    if code == "InvalidArgument":
-        expected = {"ArgumentName": "ResourceType", "ArgumentValue": "acl"}
+    r = httpx.request("OPTIONS", url, headers=headers)
+    status, expected = 400, {}
+    if value is not None:
+        expected = {"ArgumentName": "ResourceType", "ArgumentValue": value}
+    if code is None and asked == "GET":
+        status, code = 403, "AccessForbidden"
+        found = (
+            "Bucket not found"
+            if path in ("/s3", "/s3/")
+            else "CORS is not enabled for this bucket."
+        )
+        message = "CORSResponse: " + found
+        expected = {"Method": "GET", "ResourceType": "BUCKET"}
+    elif code is None and asked:
+        code, message = "BadRequest", f"Invalid Access-Control-Request-Method: {asked}"
     elif code is None:
-        if origin:
-            status, code = 403, "AccessForbidden"
-            message = "CORSResponse: " + (
-                "Bucket not found"
-                if path in ("/s3", "/s3/")
-                else "CORS is not enabled for this bucket."
-            )
-            expected = {"Method": "GET", "ResourceType": "BUCKET"}
-        else:
-            code, message = "BadRequest", "Insufficient information. Origin request header needed."
+        code, message = "BadRequest", "Insufficient information. Origin request header needed."
     assert r.status_code == status
     assert r.headers["content-type"] == "application/xml"
     assert "allow" not in r.headers
