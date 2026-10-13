@@ -2483,7 +2483,13 @@ def _method_type(method: str, resource_type: str) -> str:
 
 
 def _cors_preflight(request: Request, message: str) -> Response:
-    """Real's answer to an `OPTIONS`, which its CORS front end gives before anything reads the path.
+    """The CORS answer to an `OPTIONS` once its path's query checks pass.
+
+    A bucket or key's conflicting selectors, and a bucket's `partNumber` without `uploadId`, are
+    refused before CORS. A key's `partNumber` alone, either path's multipart pair and a single
+    selector still reach the preflight; at the service root every query does. Measured 2026-10-13
+    against s3.amazonaws.com (us-east-1), unsigned and path-style, at `noaa-ghcn-pds`, a bucket
+    name nobody owns, keys in both and the service root, with and without an Origin.
 
     Without an `Origin`, or with an empty one, it is the same 400 on a bucket, a key and the service
     root; with one it is a 403 whose message says which way the lookup failed, whose `ResourceType`
@@ -3075,10 +3081,14 @@ async def bucket_method_refusal(request: Request, bucket: str) -> Response:
     refusals are answered as real answers them, and its writes are the ones this server refuses
     instead."""
     method = request.method
-    if method == "OPTIONS":
-        return _cors_preflight(request, _CORS_DISABLED)
     q = request.query_params
     selected = _bucket_selected(q, frozenset(_BUCKET_WRITE_SELECTORS))
+    if method == "OPTIONS":
+        if len(selected) > 1:
+            return _conflict(selected)
+        if selected == ["partNumber"]:
+            return _error("InvalidRequest", _KEY_REQUIRED)
+        return _cors_preflight(request, _CORS_DISABLED)
     late = len(selected) == 1 and (method, selected[0]) in _VERSION_AFTER_THE_BUCKET
     if len(selected) <= 1 and selected != ["partNumber"]:
         skip = late or (method == "POST" and not selected)
@@ -3123,6 +3133,9 @@ async def object_method_refusal(request: Request, bucket: str, key: str) -> Resp
     `PATCH` and `POST` with the 405 that names `OBJECT`; with one, the selector decides."""
     method = request.method
     if method == "OPTIONS":
+        selected = _key_selected(request.query_params)
+        if len(selected) > 1:
+            return _conflict(selected)
         return _cors_preflight(request, _CORS_DISABLED)
     q = request.query_params
     selected = _selected(q, frozenset(_OBJECT_PATH_WRITE_SELECTORS))
