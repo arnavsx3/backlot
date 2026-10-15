@@ -10,9 +10,9 @@ serve, and a GET or a HEAD naming a selector it cannot take, is refused before t
 whether or not a credential is sent, as real refuses them, but after a signature that was sent and
 does not verify (``_method_refusal``, ``_read_refusal``); a write resolves the credential and the
 bucket first. The ``?annotation`` operations refuse an unsigned caller and an unverified V2 key or
-signature ahead of the bucket and of the method's selector refusal (``_sigv4_only_refusal``). Responses
-are S3 XML (namespace ``http://s3.amazonaws.com/doc/2006-03-01/``) or raw object bytes; errors use
-the S3 ``<Error>`` envelope.
+signature ahead of the bucket and of the method's selector refusal (``_sigv4_only_refusal``).
+Responses are S3 XML (namespace ``http://s3.amazonaws.com/doc/2006-03-01/``) or raw object bytes;
+errors use the S3 ``<Error>`` envelope.
 
 S3 dispatches on the query string: ``?acl``, ``?versioning``, ``?tagging`` and the rest each select
 a different operation at the same path. Every one of a bucket's is answered, as real answers a

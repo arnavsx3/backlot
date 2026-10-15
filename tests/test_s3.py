@@ -2411,21 +2411,25 @@ def test_an_objects_subresource_refusals_sit_where_real_puts_them(
 @pytest.mark.parametrize("method", ["PUT", "POST", "DELETE", "PATCH"])
 @pytest.mark.parametrize("path", [OBJECT_PATH, "/s3/no-such-bucket/k.txt"])
 @pytest.mark.parametrize(
-    "query", ["annotation", "annotation&annotationName=x", "annotation&annotationName="]
-)
-@pytest.mark.parametrize(
-    "credential",
+    "query, credential",
     [
-        "unsigned",
-        "empty",
-        "sigv2",
-        "sigv2-query",
-        "sigv2-tampered",
-        "sigv2-unknown-key",
-        "sigv4",
-        "sigv4-tampered",
-        "bearer",
-        "no-space",
+        (query, credential)
+        for query in ("annotation", "annotation&annotationName=x", "annotation&annotationName=")
+        for credential in (
+            "unsigned",
+            "empty",
+            "sigv2",
+            "sigv2-query",
+            "sigv2-tampered",
+            "sigv2-unknown-key",
+            "sigv4",
+            "sigv4-tampered",
+            "bearer",
+            "no-space",
+        )
+        # Signed with SigV4, an `annotationName` reaches the annotation's own operation on real,
+        # which this server does not serve.
+        if credential != "sigv4" or query == "annotation"
     ],
 )
 def test_annotation_writes_require_signature_version_4(
